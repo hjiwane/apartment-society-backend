@@ -1,9 +1,6 @@
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import DeclarativeBase
 
-Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
 
-from app.models.user import User
-from app.models.building import Building
-from app.models.unit import Unit
-from app.models.membership import Membership
-from app.models.maintenance_request import MaintenanceRequest
+

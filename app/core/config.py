@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     database_password: str 
     database_name: str
     database_username: str
+    secret_key: str
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 300
     class Config:
         env_file = ".env"
 
