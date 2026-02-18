@@ -1,10 +1,12 @@
 from fastapi import status, HTTPException, Depends, APIRouter
 from sqlalchemy.orm import Session
-
+from sqlalchemy import func
 from app.models.building import Building
 from app.models.unit import Unit
 from app.models.membership import Membership
 from app.schemas.building import BuildingCreate, BuildingOut
+from app.models.user import User
+from app.schemas.user import UserOut
 from typing import List
 from app.db.session import get_db
 from app.core.security import get_current_user
@@ -46,3 +48,50 @@ def get_building(id: int, db: Session = Depends(get_db), current_user = Depends(
 def get_buildings(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     buildings = db.query(Building).join(Unit, Unit.building_id == Building.id).join(Membership, Membership.unit_id == Unit.id).filter(Membership.user_id == current_user.id).distinct(Building.id).order_by(Building.id.asc()).all()
     return buildings
+
+@router.get("/{building_id}/users", response_model=List[UserOut])
+def list_building_users(
+    building_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    # 1) must belong to building (any membership in any unit in building)
+    belongs = (
+        db.query(Membership.id)
+        .join(Unit, Unit.id == Membership.unit_id)
+        .filter(
+            Membership.user_id == current_user.id,
+            Unit.building_id == building_id,
+        )
+        .first()
+    )
+    if not belongs:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # 2) must be manager/owner in this building
+    is_admin = (
+        db.query(Membership.id)
+        .join(Unit, Unit.id == Membership.unit_id)
+        .filter(
+            Membership.user_id == current_user.id,
+            Unit.building_id == building_id,
+            func.lower(Membership.role).in_(("manager", "owner")),
+        )
+        .first()
+        is not None
+    )
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Manager/Owner role required")
+
+    # 3) list users in this building (unique)
+    users = (
+        db.query(User)
+        .join(Membership, Membership.user_id == User.id)
+        .join(Unit, Unit.id == Membership.unit_id)
+        .filter(Unit.building_id == building_id)
+        .distinct(User.id)
+        .order_by(User.id.asc())
+        .all()
+    )
+
+    return users

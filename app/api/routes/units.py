@@ -24,6 +24,9 @@ def create_unit(unit: UnitCreate, db: Session = Depends(get_db), current_user = 
     existing = db.query(Unit).filter(Unit.building_id == unit.building_id, Unit.unit_number == unit.unit_number).first()
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail = "Unit already exists in this building")
+    
+    if unit.unit_number == "COMMON":
+        raise HTTPException(400, "COMMON unit is system-managed")
 
     new_unit = Unit(**unit.model_dump())
     db.add(new_unit)
@@ -45,3 +48,16 @@ def get_units_by_building(building_id: int, db: Session = Depends(get_db), curre
     units = db.query(Unit).filter(Unit.building_id == building_id, Unit.unit_number != "COMMON").order_by(Unit.unit_number.asc()).all()
 
     return units
+
+@router.get("/{id}", response_model=UnitOut)
+def get_unit_by_id(id: int, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    unit = db.query(Unit).filter(Unit.id == id).first()
+    if not unit or unit.unit_number == "COMMON":
+        raise HTTPException(status_code=404, detail="Unit not found")
+
+    belongs = db.query(Membership.id).filter(Membership.user_id == current_user.id, Membership.unit_id == unit.id).first()
+    
+    if not belongs:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return unit

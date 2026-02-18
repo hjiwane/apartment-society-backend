@@ -16,110 +16,125 @@ router = APIRouter(prefix="/maintenance-requests", tags=["Maintenance Requests"]
 
 MANAGER_ROLES = {"manager", "owner"}
 
-def _building_exists(db: Session, building_id: int) -> None:
-    if not db.query(Building).filter(Building.id == building_id).first(): 
-        raise HTTPException(status_code=404, detail="Building not found")
+@router.post("/", status_code=201, response_model=MaintenanceRequestOut)
+def create_request(payload: MaintenanceRequestCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    unit = db.query(Unit).filter(Unit.id == payload.unit_id).first()
+    if not unit:
+        raise HTTPException(404, "Unit not found")
 
+    # block COMMON so owners (who only have COMMON) can't create
+    if unit.unit_number == "COMMON":
+        raise HTTPException(403, "Owners cannot create maintenance requests")
 
-def _unit_in_building(db: Session, unit_id: int, building_id: int) -> Unit:
-    unit = db.query(Unit).filter(Unit.id == unit_id).first()
-    if not unit: 
-        raise HTTPException(status_code=404, detail="Unit not found")
-    if unit.building_id != building_id: 
-        raise HTTPException(status_code=400, detail="Unit does not belong to this building")
-    return unit
+    # must be member of that unit (tenant/manager/etc)
+    is_member = db.query(Membership).filter(Membership.user_id == current_user.id, Membership.unit_id == payload.unit_id).first()
+    if not is_member:
+        raise HTTPException(403, "Not authorized for this unit")
 
-
-def _user_belongs_to_building(db: Session, user_id: int, building_id: int) -> None:
-    exists = db.query(Membership).join(Unit, Membership.unit_id == Unit.id).filter(Membership.user_id == user_id, Unit.building_id == building_id).first()
-    if not exists: 
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User does not belong to this building")
-
-
-def _user_is_manager_in_building(db: Session, user_id: int, building_id: int) -> bool:
-    return db.query(Membership).join(Unit, Membership.unit_id == Unit.id).filter(Membership.user_id == user_id, Unit.building_id == building_id, func.lower(Membership.role).in_(MANAGER_ROLES)).first() is not None
-
-
-def _user_is_member_of_unit(db: Session, user_id: int, unit_id: int) -> bool:
-    return db.query(Membership).filter(Membership.user_id == user_id, Membership.unit_id == unit_id).first() is not None
-
-
-@router.post("/", status_code=status.HTTP_201_CREATED, response_model=MaintenanceRequestOut)
-def create_request(payload: MaintenanceRequestCreate, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    _building_exists(db, payload.building_id)
-    _user_belongs_to_building(db, current_user.id, payload.building_id)
-
-    # unit/common-area rules + authorization
-    if payload.unit_id is not None:
-        _unit_in_building(db, payload.unit_id, payload.building_id)
-        # tenant must be member of unit OR manager/owner in building
-        if not _user_is_member_of_unit(db, current_user.id, payload.unit_id):
-            if not _user_is_manager_in_building(db, current_user.id, payload.building_id):
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this unit/building")
-
-    req = MaintenanceRequest(building_id=payload.building_id, unit_id=payload.unit_id, created_by_user_id=current_user.id, title=payload.title, description=payload.description, status="OPEN")
+    req = MaintenanceRequest(unit_id=payload.unit_id, created_by_user_id=current_user.id, title=payload.title, description=payload.description,status="open")
     db.add(req)
     db.commit()
-    db.refresh(req)
 
     return req
 
 @router.get("/", response_model=List[MaintenanceOut])
-def get_requests(building_id: int, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    _building_exists(db, building_id)
-    _user_belongs_to_building(db, current_user.id, building_id)
+def get_requests(building_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    building = db.query(Building).filter(Building.id == building_id).first()
+    if not building:
+        raise HTTPException(status_code=404, detail="Building not found")
 
-    is_manager = _user_is_manager_in_building(db, current_user.id, building_id)
+    # user must belong to this building (any membership in any unit in building)
+    belongs = (
+        db.query(Membership.id)
+        .join(Unit, Unit.id == Membership.unit_id)
+        .filter(Membership.user_id == current_user.id, Unit.building_id == building_id)
+        .first()
+    )
+    if not belongs:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    base = db.query(MaintenanceRequest, func.count(func.distinct(MaintenanceVote.user_id))).join(MaintenanceVote, MaintenanceVote.maintenance_request_id == MaintenanceRequest.id, isouter=True).group_by(MaintenanceRequest.id).filter(MaintenanceRequest.building_id == building_id)
-    if is_manager:
-        results = base.order_by(MaintenanceRequest.created_at.desc()).all()
-    else:
-        my_unit_ids_sq = db.query(Unit.id).join(Membership, Membership.unit_id == Unit.id).filter(Membership.user_id == current_user.id, Unit.building_id == building_id).subquery()
-
-        results = base.filter((MaintenanceRequest.unit_id.is_(None)) | (MaintenanceRequest.unit_id.in_(my_unit_ids_sq))).order_by(MaintenanceRequest.created_at.desc()).all()
+    results = (
+        db.query(
+            MaintenanceRequest,
+            func.count(func.distinct(MaintenanceVote.user_id)).label("votes")
+        )
+        .join(Unit, Unit.id == MaintenanceRequest.unit_id)
+        .outerjoin(MaintenanceVote, MaintenanceVote.maintenance_request_id == MaintenanceRequest.id)
+        .filter(Unit.building_id == building_id)
+        .group_by(MaintenanceRequest.id)
+        .order_by(MaintenanceRequest.created_at.desc())
+        .all()
+    )
 
     return [{"maintenance": req, "votes": votes} for req, votes in results]
 
+
+
 @router.get("/{id}", response_model=MaintenanceOut)
-def get_request(id: int, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+def get_request(
+    id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     result = (
-        db.query(MaintenanceRequest,func.count(func.distinct(MaintenanceVote.user_id)).label("vote_count")).outerjoin(MaintenanceVote, MaintenanceVote.maintenance_request_id == MaintenanceRequest.id).filter(MaintenanceRequest.id == id).group_by(MaintenanceRequest.id).first())
+        db.query(
+            MaintenanceRequest,
+            func.count(func.distinct(MaintenanceVote.user_id)).label("votes"),
+        )
+        .outerjoin(
+            MaintenanceVote,
+            MaintenanceVote.maintenance_request_id == MaintenanceRequest.id,
+        )
+        .filter(MaintenanceRequest.id == id)
+        .group_by(MaintenanceRequest.id)
+        .first()
+    )
 
     if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"maintenance request with id={id} does not exist",)
+        raise HTTPException(status_code=404, detail="Maintenance request not found")
 
-    req, vote_count = result
+    req, votes = result
 
-    # must belong to building
-    _user_belongs_to_building(db, current_user.id, req.building_id)
+    unit = db.query(Unit).filter(Unit.id == req.unit_id).first()
+    if not unit:
+        raise HTTPException(status_code=404, detail="Unit not found")
 
-    # manager/owner can view all
-    is_manager = _user_is_manager_in_building(db, current_user.id, req.building_id)
+    # user must belong to building (any membership in any unit in that building)
+    belongs = (
+        db.query(Membership.id)
+        .join(Unit, Membership.unit_id == Unit.id)
+        .filter(
+            Membership.user_id == current_user.id,
+            Unit.building_id == unit.building_id,
+        )
+        .first()
+    )
+    if not belongs:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    # tenants: common-area OK; unit-specific only if unit member
-    if not is_manager and req.unit_id is not None:
-        if not _user_is_member_of_unit(db, current_user.id, req.unit_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-
-    return {"maintenance": req, "votes": vote_count}
-
-from app.schemas.maintenance import MaintenanceRequestUpdate
+    return {"maintenance": req, "votes": votes}
 
 @router.patch("/{id}", response_model=MaintenanceRequestOut)
-def update_request(id: int, payload: MaintenanceRequestUpdate, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+def update_request(id: int, payload: MaintenanceRequestUpdate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     req = db.query(MaintenanceRequest).filter(MaintenanceRequest.id == id).first()
     if not req:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"maintenance request with id={id} does not exist")
+        raise HTTPException(status_code=404, detail="Maintenance request not found")
 
-    _user_belongs_to_building(db, current_user.id, req.building_id)
+    unit = db.query(Unit).filter(Unit.id == req.unit_id).first()
+    if not unit:
+        raise HTTPException(status_code=404, detail="Unit not found")
 
-    if not _user_is_manager_in_building(db, current_user.id, req.building_id):
+    # manager/owner in the SAME building can update any request in that building
+    is_manager = (db.query(Membership.id).join(Unit, Unit.id == Membership.unit_id).filter(Membership.user_id == current_user.id,Unit.building_id == unit.building_id,func.lower(Membership.role).in_(("manager", "owner"))).first() is not None)
+
+    if not is_manager:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager/Owner role required")
 
-    req.status = payload.status
+    # normalize to DB style (OPEN / IN_PROGRESS / RESOLVED)
+    req.status = payload.status.lower()
     db.commit()
     return req
+
 
 
 

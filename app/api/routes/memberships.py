@@ -78,10 +78,10 @@ def delete_membership_by_owner(id: int, db: Session = Depends(get_db), current_u
     if not owner: 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner role required")
     
-    if func.lower(target.role) == "owner":
+    if (target.role).lower() == "owner":
         owners = db.query(Membership).join(Unit, Membership.unit_id == Unit.id).filter(Unit.building_id == unit.building_id, func.lower(Membership.role) == "owner").count()
         if owners <= 1: 
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot remove the only owner from this building")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot remove the only owner from this building")
 
     db.delete(target)
     db.commit()
