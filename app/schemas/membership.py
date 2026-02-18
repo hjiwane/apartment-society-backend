@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 from typing import Literal
 
@@ -15,9 +15,10 @@ class MembershipOut(BaseModel):
     unit_id: int
     role: Role
     created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
 
-    class Config:
-        from_attributes = True
+    # class Config:
+    #     from_attributes = True
 
 class MembershipUpdate(BaseModel):
     role: Role        

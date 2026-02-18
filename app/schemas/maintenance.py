@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 from typing import Optional, Literal
 
@@ -6,24 +6,23 @@ from typing import Optional, Literal
 Status = Literal["open", "in_progress", "resolved"]
 
 class MaintenanceRequestCreate(BaseModel):
-    building_id: int
-    unit_id: Optional[int] = None
+    unit_id: int
     title: str
-    description: Optional[str] = None 
+    description: str
 
 class MaintenanceRequestOut(BaseModel):
     id: int
-    building_id: int
-    unit_id: Optional[int]
+    unit_id: int
     created_by_user_id: int
     title: str
-    description: Optional[str]                             
+    description: str                            
     status: str
     vote_count: Optional[int] = None
     created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
 
-    class Config:
-        from_attributes = True    
+    # class Config:
+    #     from_attributes = True    
 
 class MaintenanceOut(BaseModel):
     maintenance: MaintenanceRequestOut
